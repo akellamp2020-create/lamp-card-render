@@ -125,6 +125,10 @@ function htmlFromPayload(p) {
     rozrah = normalizeTableBlock(legacyDetailsToBlock('Розрахунок', src, 'normal'));
   }
 
+  // ✅ ДОБАВИЛИ: дата игры (из payload.gameDate)
+  const gameDate = String(p?.gameDate || '').trim();
+  const resultTitle = gameDate ? `Результат гри від ${gameDate}` : 'Результат гри';
+
   const css = `
     *{box-sizing:border-box}
     body{
@@ -185,9 +189,11 @@ function htmlFromPayload(p) {
     if (!R) return '';
     const name = esc(R.name ?? '');
     const rows = Array.isArray(R.rows) ? R.rows : [];
+
+    // ✅ ИСПРАВИЛИ: заголовок с датой
     return `
       <div class="card">
-        <div class="title">Результат</div>
+        <div class="title">${esc(resultTitle)}</div>
         <div class="row"><div class="k">Ім'я</div><div class="v">${name}</div></div>
         ${rows.map(r => {
           const cls = String(r.cls || 'zero');
@@ -233,7 +239,6 @@ function htmlFromPayload(p) {
           </div>
         `;
       } else {
-        // если вдруг нет total — всё равно покажем "Разом"
         html += `
           <div class="row">
             <div class="k"><b>Разом</b></div>
@@ -242,7 +247,7 @@ function htmlFromPayload(p) {
         `;
       }
 
-      // 2) таблицы по 6, ВСЕ значения стартуют с 1-го столбца (нет пустой колонки)
+      // 2) таблицы по 6
       const vChunks = chunk(restV, COLS_PER_ROW);
       const tChunks = chunk(restT, COLS_PER_ROW);
 
