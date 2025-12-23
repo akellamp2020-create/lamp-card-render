@@ -43,12 +43,41 @@ function normalizeTableBlock(block) {
   };
 }
 
+function parsePipeList(str) {
+  return String(str || '')
+    .split('|')
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+function legacyDetailsToBlock(title, detailsStr, scheme) {
+  const parts = parsePipeList(detailsStr);
+  if (!parts.length) return null;
+
+  return {
+    title,
+    scheme: scheme || 'normal',
+    rows: [
+      {
+        values: parts.map((text, idx) => ({
+          text,
+          cls: idx === 0 ? 'pos' : 'zero'
+        })),
+        times: []
+      }
+    ]
+  };
+}
+
 function htmlFromPayload(p) {
+  // NEW payload (blocks)
   const blocks = p?.blocks || {};
   const result = blocks?.result || null;
-  const rozmin = normalizeTableBlock(blocks?.rozmin);
-  const rozrah = normalizeTableBlock(blocks?.rozrahunok);
 
+  let rozmin = normalizeTableBlock(blocks?.rozmin);
+  let rozrah = normalizeTableBlock(blocks?.rozrahunok);
+
+  // legacy fallback for Result card
   const fallbackResult = (!result && (p?.name || p?.labelRozmin || p?.labelRozrah || p?.labelDebt)) ? {
     title: 'Результат',
     scheme: 'normal',
@@ -62,6 +91,14 @@ function htmlFromPayload(p) {
 
   const R = result || fallbackResult;
 
+  // ✅ legacy fallback for tables (detailsRozmin/detailsRozrah)
+  if (!rozmin && p?.detailsRozmin) {
+    rozmin = legacyDetailsToBlock('Розмін', p.detailsRozmin, 'rozmin');
+  }
+  if (!rozrah && p?.detailsRozrah) {
+    rozrah = legacyDetailsToBlock('Розрахунок', p.detailsRozrah, 'normal');
+  }
+
   const css = `
     *{box-sizing:border-box}
     body{
@@ -71,29 +108,18 @@ function htmlFromPayload(p) {
       color:#111;
       padding:28px;
     }
-    .wrap{
-      width: 720px;
-      margin: 0 auto;
-    }
+    .wrap{ width:720px; margin:0 auto; }
     .card{
       border:1px solid #e9e9e9;
       border-radius:26px;
-      padding:22px 22px;
+      padding:22px;
       background:#fff;
-      margin: 0 0 22px 0;
+      margin:0 0 22px 0;
     }
-    .title{
-      font-size:34px;
-      font-weight:800;
-      margin: 0 0 14px 0;
-    }
+    .title{ font-size:34px; font-weight:800; margin:0 0 14px 0; }
     .row{
-      display:flex;
-      justify-content:space-between;
-      gap:16px;
-      padding:18px 0;
-      border-top:1px solid #f1f1f1;
-      align-items:center;
+      display:flex; justify-content:space-between; gap:16px;
+      padding:18px 0; border-top:1px solid #f1f1f1; align-items:center;
     }
     .row:first-of-type{ border-top:0; padding-top:6px; }
     .k{ font-size:26px; color:#444; }
@@ -102,36 +128,19 @@ function htmlFromPayload(p) {
     .neg{ color:#b00020; }
     .zero{ color:#111; }
 
-    table{
-      width:100%;
-      border-collapse:collapse;
-      margin-top:12px;
-    }
+    table{ width:100%; border-collapse:collapse; margin-top:12px; }
     th, td{
-      padding:18px 10px;
-      border-top:1px solid #f1f1f1;
-      text-align:right;
-      white-space:nowrap;
+      padding:18px 10px; border-top:1px solid #f1f1f1;
+      text-align:right; white-space:nowrap;
     }
     th{
-      text-align:left;
-      color:#111;
-      font-size:26px;
-      font-weight:800;
-      background:#fafafa;
-      border-top:0;
-      padding:18px 10px;
+      text-align:left; color:#111; font-size:26px; font-weight:800;
+      background:#fafafa; border-top:0; padding:18px 10px;
     }
-    td{
-      font-size:34px;
-      font-weight:800;
-    }
+    td{ font-size:34px; font-weight:800; }
     .time td{
-      font-weight:600;
-      font-size:22px;
-      color:#9a9a9a;
-      padding-top:12px;
-      padding-bottom:6px;
+      font-weight:600; font-size:22px; color:#9a9a9a;
+      padding-top:12px; padding-bottom:6px;
     }
   `;
 
@@ -168,9 +177,8 @@ function htmlFromPayload(p) {
     const valuesRow = `<tr>${
       values.map((c) => {
         let cls = String(c?.cls || 'zero');
-        if (scheme === 'rozmin') cls = invertCls(cls);
-        const txt = esc(c?.text ?? '');
-        return `<td class="${cls}">${txt}</td>`;
+        if (scheme === 'rozmin') cls = invertCls(cls); // на всякий случай
+        return `<td class="${cls}">${esc(c?.text ?? '')}</td>`;
       }).join('')
     }</tr>`;
 
@@ -193,13 +201,9 @@ function htmlFromPayload(p) {
     `;
   }
 
-  return `
-<!doctype html>
+  return `<!doctype html>
 <html>
-<head>
-<meta charset="utf-8" />
-<style>${css}</style>
-</head>
+<head><meta charset="utf-8" /><style>${css}</style></head>
 <body>
   <div class="wrap">
     ${renderResultCard()}
@@ -207,8 +211,7 @@ function htmlFromPayload(p) {
     ${renderTableCard(rozrah)}
   </div>
 </body>
-</html>
-  `;
+</html>`;
 }
 
 /* ---------- HEALTH ---------- */
@@ -221,34 +224,26 @@ app.get('/', (req, res) => res.type('text').send('LAMP renderer OK ✅\nUse POST
 app.post('/render', async (req, res) => {
   let browser;
   try {
-    console.log('=== PAYLOAD ===');
-    console.log(JSON.stringify(req.body, null, 2));
-
     const html = htmlFromPayload(req.body || {});
 
+    const executablePath = await chromium.executablePath();
+
     browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
+      executablePath,
       headless: chromium.headless,
+      args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox'],
+      defaultViewport: { width: 900, height: 1600, deviceScaleFactor: 2 },
     });
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 900, height: 1600, deviceScaleFactor: 2 });
     await page.setContent(html, { waitUntil: 'networkidle0' });
+    await page.evaluate(() => window.scrollTo(0, 0));
 
-    const el = await page.$('.wrap');
-    const box = await el.boundingBox();
-
+    // ✅ fullPage — ничего не обрежется
     const png = await page.screenshot({
       type: 'png',
-      clip: {
-        x: Math.floor(box.x),
-        y: Math.floor(box.y),
-        width: Math.ceil(box.width),
-        height: Math.ceil(box.height),
-      },
-      omitBackground: false
+      fullPage: true,
+      omitBackground: false,
     });
 
     await browser.close();
@@ -264,6 +259,4 @@ app.post('/render', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`🚀 LAMP renderer running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 LAMP renderer running on port ${PORT}`));
