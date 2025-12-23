@@ -1,5 +1,5 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -43,13 +43,11 @@ function normalizeTableBlock(block) {
 }
 
 function htmlFromPayload(p) {
-  // Поддержка НОВОГО payload (blocks)
   const blocks = p?.blocks || {};
   const result = blocks?.result || null;
   const rozmin = normalizeTableBlock(blocks?.rozmin);
   const rozrah = normalizeTableBlock(blocks?.rozrahunok);
 
-  // fallback: если blocks нет — попробуем собрать из legacy полей
   const fallbackResult = (!result && (p?.name || p?.labelRozmin || p?.labelRozrah || p?.labelDebt)) ? {
     title: 'Результат',
     scheme: 'normal',
@@ -99,11 +97,10 @@ function htmlFromPayload(p) {
     .row:first-of-type{ border-top:0; padding-top:6px; }
     .k{ font-size:26px; color:#444; }
     .v{ font-size:34px; font-weight:800; }
-    .pos{ color:#0a7a2f; }   /* зелёный */
-    .neg{ color:#b00020; }   /* красный */
-    .zero{ color:#111; }     /* чёрный */
+    .pos{ color:#0a7a2f; }
+    .neg{ color:#b00020; }
+    .zero{ color:#111; }
 
-    /* Таблица как на сайте */
     table{
       width:100%;
       border-collapse:collapse;
@@ -161,7 +158,6 @@ function htmlFromPayload(p) {
     const title = esc(block.title || '');
     const scheme = String(block.scheme || 'normal');
 
-    // берём первую строку (у тебя обычно одна)
     const r0 = block.rows[0];
     const values = r0?.values || [];
     const times  = r0?.times || [];
@@ -169,11 +165,10 @@ function htmlFromPayload(p) {
     const header = `<tr><th>Разом</th>${values.slice(1).map(() => `<th></th>`).join('')}</tr>`;
 
     const valuesRow = `<tr>${
-      values.map((c, idx) => {
+      values.map((c) => {
         let cls = String(c?.cls || 'zero');
-        if (scheme === 'rozmin') cls = invertCls(cls); // подстраховка для Розмін
+        if (scheme === 'rozmin') cls = invertCls(cls);
         const txt = esc(c?.text ?? '');
-        // первая ячейка чуть “важнее” — но без отдельного цвета
         return `<td class="${cls}">${txt}</td>`;
       }).join('')
     }</tr>`;
@@ -223,23 +218,38 @@ app.get('/', (req, res) => res.type('text').send('LAMP renderer OK ✅\nUse POST
 
 /* ---------- RENDER ---------- */
 app.post('/render', async (req, res) => {
+  let browser;
   try {
     console.log('=== PAYLOAD ===');
     console.log(JSON.stringify(req.body, null, 2));
 
     const html = htmlFromPayload(req.body || {});
-    const browser = await puppeteer.launch({
+
+    const launchOpts = {
       headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+      ],
+    };
+
+    // Render/Cloud: путь к браузеру должен приходить из env
+    // (на Render мы добавим PUPPETEER_EXECUTABLE_PATH)
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+      launchOpts.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+
+    browser = await puppeteer.launch(launchOpts);
 
     const page = await browser.newPage();
     await page.setViewport({ width: 900, height: 1600, deviceScaleFactor: 2 });
     await page.setContent(html, { waitUntil: 'networkidle0' });
 
-    // Снимок именно "обертки", чтобы не было огромного пустого листа
     const el = await page.$('.wrap');
     const box = await el.boundingBox();
+
     const png = await page.screenshot({
       type: 'png',
       clip: {
@@ -252,11 +262,13 @@ app.post('/render', async (req, res) => {
     });
 
     await browser.close();
+    browser = null;
 
     res.setHeader('Content-Type', 'image/png');
     res.send(png);
   } catch (e) {
     console.error('RENDER ERROR:', e);
+    try { if (browser) await browser.close(); } catch (_) {}
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
