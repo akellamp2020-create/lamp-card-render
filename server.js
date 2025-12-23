@@ -5,18 +5,14 @@ const chromium = require('@sparticuz/chromium');
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
+/* ---------------- helpers ---------------- */
+
 function esc(s) {
   return String(s ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
-}
-
-function invertCls(cls) {
-  if (cls === 'pos') return 'neg';
-  if (cls === 'neg') return 'pos';
-  return cls || 'zero';
 }
 
 function normalizeTableBlock(block) {
@@ -50,19 +46,30 @@ function parsePipeList(str) {
     .filter(Boolean);
 }
 
+/**
+ * Legacy details -> block
+ * rozmin: first + last = pos, middle = neg (как на сайте)
+ * normal: всё zero/pos по желанию
+ */
 function legacyDetailsToBlock(title, detailsStr, scheme) {
   const parts = parsePipeList(detailsStr);
   if (!parts.length) return null;
 
+  const sch = scheme || 'normal';
+  const last = parts.length - 1;
+
   return {
     title,
-    scheme: scheme || 'normal',
+    scheme: sch,
     rows: [
       {
-        values: parts.map((text, idx) => ({
-          text,
-          cls: idx === 0 ? 'pos' : 'zero'
-        })),
+        values: parts.map((text, idx) => {
+          if (sch === 'rozmin') {
+            return { text, cls: (idx === 0 || idx === last) ? 'pos' : 'neg' };
+          }
+          // для "Розрахунок" (legacy) сделаем зелёным
+          return { text, cls: 'pos' };
+        }),
         times: []
       }
     ]
@@ -94,9 +101,13 @@ function htmlFromPayload(p) {
   // ✅ legacy fallback for tables (detailsRozmin/detailsRozrah)
   if (!rozmin && p?.detailsRozmin) {
     rozmin = legacyDetailsToBlock('Розмін', p.detailsRozmin, 'rozmin');
+    rozmin = normalizeTableBlock(rozmin);
   }
-  if (!rozrah && p?.detailsRozrah) {
-    rozrah = legacyDetailsToBlock('Розрахунок', p.detailsRozrah, 'normal');
+  if (!rozrah && (p?.detailsRozrah || p?.valueRozrah)) {
+    // если detailsRozrah нет, но есть valueRozrah — покажем его как единственную ячейку
+    const src = p?.detailsRozrah ? p.detailsRozrah : String(p.valueRozrah);
+    rozrah = legacyDetailsToBlock('Розрахунок', src, 'normal');
+    rozrah = normalizeTableBlock(rozrah);
   }
 
   const css = `
@@ -163,39 +174,47 @@ function htmlFromPayload(p) {
     `;
   }
 
+  // ✅ РИСУЕМ ВСЕ СТРОКИ block.rows + times
   function renderTableCard(block) {
-    if (!block || !block.rows || !block.rows.length) return '';
+    if (!block || !Array.isArray(block.rows) || block.rows.length === 0) return '';
+
     const title = esc(block.title || '');
-    const scheme = String(block.scheme || 'normal');
 
-    const r0 = block.rows[0];
-    const values = r0?.values || [];
-    const times  = r0?.times || [];
+    const maxCols = Math.max(
+      1,
+      ...block.rows.map(r => Array.isArray(r?.values) ? r.values.length : 0)
+    );
 
-    const header = `<tr><th>Разом</th>${values.slice(1).map(() => `<th></th>`).join('')}</tr>`;
-
-    const valuesRow = `<tr>${
-      values.map((c) => {
-        let cls = String(c?.cls || 'zero');
-        if (scheme === 'rozmin') cls = invertCls(cls); // на всякий случай
-        return `<td class="${cls}">${esc(c?.text ?? '')}</td>`;
-      }).join('')
+    const header = `<tr><th>Разом</th>${
+      Array.from({ length: Math.max(0, maxCols - 1) }, () => `<th></th>`).join('')
     }</tr>`;
 
-    const hasTimes = times.some(t => String(t?.text ?? '').trim() !== '');
-    const timesRow = hasTimes ? `<tr class="time">${
-      times.map(t => `<td>${esc(t?.text ?? '')}</td>`).join('')
-    }</tr>` : '';
+    const body = block.rows.map(r => {
+      const values = Array.isArray(r?.values) ? r.values : [];
+      const times  = Array.isArray(r?.times) ? r.times : [];
+
+      const valuesRow = `<tr>${
+        Array.from({ length: maxCols }, (_, i) => {
+          const c = values[i] || {};
+          const cls = String(c?.cls || 'zero'); // ❗ НЕ инвертим
+          return `<td class="${cls}">${esc(c?.text ?? '')}</td>`;
+        }).join('')
+      }</tr>`;
+
+      const hasTimes = times.some(t => String(t?.text ?? '').trim() !== '');
+      const timesRow = hasTimes ? `<tr class="time">${
+        Array.from({ length: maxCols }, (_, i) => `<td>${esc(times[i]?.text ?? '')}</td>`).join('')
+      }</tr>` : '';
+
+      return valuesRow + timesRow;
+    }).join('');
 
     return `
       <div class="card">
         <div class="title">${title}</div>
         <table>
           <thead>${header}</thead>
-          <tbody>
-            ${valuesRow}
-            ${timesRow}
-          </tbody>
+          <tbody>${body}</tbody>
         </table>
       </div>
     `;
@@ -225,7 +244,6 @@ app.post('/render', async (req, res) => {
   let browser;
   try {
     const html = htmlFromPayload(req.body || {});
-
     const executablePath = await chromium.executablePath();
 
     browser = await puppeteer.launch({
@@ -239,7 +257,6 @@ app.post('/render', async (req, res) => {
     await page.setContent(html, { waitUntil: 'networkidle0' });
     await page.evaluate(() => window.scrollTo(0, 0));
 
-    // ✅ fullPage — ничего не обрежется
     const png = await page.screenshot({
       type: 'png',
       fullPage: true,
