@@ -5,6 +5,15 @@ const chromium = require('@sparticuz/chromium');
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
+/** ✅ CORS для Google Sites */
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 /* ---------------- helpers ---------------- */
 
 function esc(s) {
@@ -31,11 +40,11 @@ function normalizeTableBlock(block) {
       return {
         values: values.map(v => ({
           text: String(v?.text ?? ''),
-          cls: String(v?.cls ?? 'zero')
+          cls: String(v?.cls ?? 'zero'),
         })),
-        times: times.map(t => ({ text: String(t?.text ?? '') }))
+        times: times.map(t => ({ text: String(t?.text ?? '') })),
       };
-    })
+    }),
   };
 }
 
@@ -49,7 +58,7 @@ function parsePipeList(str) {
 /**
  * Legacy details -> block
  * rozmin: first + last = pos, middle = neg (как на сайте)
- * normal: всё zero/pos по желанию
+ * normal: всё pos (для старого detailsRozrah)
  */
 function legacyDetailsToBlock(title, detailsStr, scheme) {
   const parts = parsePipeList(detailsStr);
@@ -67,17 +76,21 @@ function legacyDetailsToBlock(title, detailsStr, scheme) {
           if (sch === 'rozmin') {
             return { text, cls: (idx === 0 || idx === last) ? 'pos' : 'neg' };
           }
-          // для "Розрахунок" (legacy) сделаем зелёным
           return { text, cls: 'pos' };
         }),
-        times: []
-      }
-    ]
+        times: [],
+      },
+    ],
   };
 }
 
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
 function htmlFromPayload(p) {
-  // NEW payload (blocks)
   const blocks = p?.blocks || {};
   const result = blocks?.result || null;
 
@@ -85,29 +98,29 @@ function htmlFromPayload(p) {
   let rozrah = normalizeTableBlock(blocks?.rozrahunok);
 
   // legacy fallback for Result card
-  const fallbackResult = (!result && (p?.name || p?.labelRozmin || p?.labelRozrah || p?.labelDebt)) ? {
-    title: 'Результат',
-    scheme: 'normal',
-    name: String(p?.name ?? ''),
-    rows: [
-      { key: String(p?.labelRozmin ?? 'Розмін'), value: String(p?.valueRozmin ?? ''), cls: 'pos' },
-      { key: String(p?.labelRozrah ?? 'Розрахунок'), value: String(p?.valueRozrah ?? ''), cls: 'pos' },
-      { key: String(p?.labelDebt ?? 'Підсумок'), value: String(p?.valueDebt ?? ''), cls: 'pos' },
-    ]
-  } : null;
+  const fallbackResult =
+    (!result && (p?.name || p?.labelRozmin || p?.labelRozrah || p?.labelDebt))
+      ? {
+          title: 'Результат',
+          scheme: 'normal',
+          name: String(p?.name ?? ''),
+          rows: [
+            { key: String(p?.labelRozmin ?? 'Розмін'), value: String(p?.valueRozmin ?? ''), cls: 'pos' },
+            { key: String(p?.labelRozrah ?? 'Розрахунок'), value: String(p?.valueRozrah ?? ''), cls: 'pos' },
+            { key: String(p?.labelDebt ?? 'Підсумок'), value: String(p?.valueDebt ?? ''), cls: 'pos' },
+          ],
+        }
+      : null;
 
   const R = result || fallbackResult;
 
-  // ✅ legacy fallback for tables (detailsRozmin/detailsRozrah)
+  // legacy fallback for tables
   if (!rozmin && p?.detailsRozmin) {
-    rozmin = legacyDetailsToBlock('Розмін', p.detailsRozmin, 'rozmin');
-    rozmin = normalizeTableBlock(rozmin);
+    rozmin = normalizeTableBlock(legacyDetailsToBlock('Розмін', p.detailsRozmin, 'rozmin'));
   }
   if (!rozrah && (p?.detailsRozrah || p?.valueRozrah)) {
-    // если detailsRozrah нет, но есть valueRozrah — покажем его как единственную ячейку
     const src = p?.detailsRozrah ? p.detailsRozrah : String(p.valueRozrah);
-    rozrah = legacyDetailsToBlock('Розрахунок', src, 'normal');
-    rozrah = normalizeTableBlock(rozrah);
+    rozrah = normalizeTableBlock(legacyDetailsToBlock('Розрахунок', src, 'normal'));
   }
 
   const css = `
@@ -126,6 +139,7 @@ function htmlFromPayload(p) {
       padding:22px;
       background:#fff;
       margin:0 0 22px 0;
+      overflow:hidden; /* ✅ ничего не вылезает за скругления */
     }
     .title{ font-size:34px; font-weight:800; margin:0 0 14px 0; }
     .row{
@@ -163,59 +177,91 @@ function htmlFromPayload(p) {
       <div class="card">
         <div class="title">Результат</div>
         <div class="row"><div class="k">Ім'я</div><div class="v">${name}</div></div>
-        ${rows.map(r => {
-          const cls = String(r.cls || 'zero');
-          return `<div class="row">
-            <div class="k">${esc(r.key ?? '')}</div>
-            <div class="v ${cls}">${esc(r.value ?? '')}</div>
-          </div>`;
-        }).join('')}
+        ${rows
+          .map(r => {
+            const cls = String(r.cls || 'zero');
+            return `<div class="row">
+              <div class="k">${esc(r.key ?? '')}</div>
+              <div class="v ${cls}">${esc(r.value ?? '')}</div>
+            </div>`;
+          })
+          .join('')}
       </div>
     `;
   }
 
-  // ✅ РИСУЕМ ВСЕ СТРОКИ block.rows + times
+  /**
+   * ✅ ВАЖНО:
+   * - НИКАКОЙ инверсии цветов на сервере
+   * - Длинные ряды режем на строки (COLS_PER_ROW)
+   * - Рисуем все block.rows
+   */
   function renderTableCard(block) {
     if (!block || !Array.isArray(block.rows) || block.rows.length === 0) return '';
 
     const title = esc(block.title || '');
 
-    const maxCols = Math.max(
+    // сколько значений в одной строке (под Telegram/телефон)
+    const COLS_PER_ROW = 6;
+
+    // вычислим максимум по всем строкам
+    const maxColsAll = Math.max(
       1,
-      ...block.rows.map(r => Array.isArray(r?.values) ? r.values.length : 0)
+      ...block.rows.map(r => (Array.isArray(r?.values) ? r.values.length : 0))
     );
 
-    const header = `<tr><th>Разом</th>${
-      Array.from({ length: Math.max(0, maxCols - 1) }, () => `<th></th>`).join('')
-    }</tr>`;
+    // если строка длинная — будем резать на чанки по 6
+    const needChunk = maxColsAll > COLS_PER_ROW;
 
-    const body = block.rows.map(r => {
-      const values = Array.isArray(r?.values) ? r.values : [];
-      const times  = Array.isArray(r?.times) ? r.times : [];
+    const tablesHtml = block.rows
+      .map(r => {
+        const values = Array.isArray(r?.values) ? r.values : [];
+        const times  = Array.isArray(r?.times)  ? r.times  : [];
 
-      const valuesRow = `<tr>${
-        Array.from({ length: maxCols }, (_, i) => {
-          const c = values[i] || {};
-          const cls = String(c?.cls || 'zero'); // ❗ НЕ инвертим
-          return `<td class="${cls}">${esc(c?.text ?? '')}</td>`;
-        }).join('')
-      }</tr>`;
+        const hasTimes = times.some(t => String(t?.text ?? '').trim() !== '');
 
-      const hasTimes = times.some(t => String(t?.text ?? '').trim() !== '');
-      const timesRow = hasTimes ? `<tr class="time">${
-        Array.from({ length: maxCols }, (_, i) => `<td>${esc(times[i]?.text ?? '')}</td>`).join('')
-      }</tr>` : '';
+        const vChunks = needChunk ? chunk(values, COLS_PER_ROW) : [values];
+        const tChunks = needChunk ? chunk(times,  COLS_PER_ROW) : [times];
 
-      return valuesRow + timesRow;
-    }).join('');
+        return vChunks
+          .map((vc, idx) => {
+            const tc = tChunks[idx] || [];
+
+            const cols = Math.max(1, vc.length);
+
+            const header = `<tr><th>${idx === 0 ? 'Разом' : ''}</th>${
+              Array.from({ length: Math.max(0, cols - 1) }, () => `<th></th>`).join('')
+            }</tr>`;
+
+            const valuesRow = `<tr>${
+              Array.from({ length: cols }, (_, i) => {
+                const c = vc[i] || {};
+                const cls = String(c?.cls || 'zero');
+                return `<td class="${cls}">${esc(c?.text ?? '')}</td>`;
+              }).join('')
+            }</tr>`;
+
+            const timesRow = (hasTimes && tc.length)
+              ? `<tr class="time">${
+                  Array.from({ length: cols }, (_, i) => `<td>${esc(tc[i]?.text ?? '')}</td>`).join('')
+                }</tr>`
+              : '';
+
+            return `
+              <table>
+                <thead>${header}</thead>
+                <tbody>${valuesRow}${timesRow}</tbody>
+              </table>
+            `;
+          })
+          .join('');
+      })
+      .join('');
 
     return `
       <div class="card">
         <div class="title">${title}</div>
-        <table>
-          <thead>${header}</thead>
-          <tbody>${body}</tbody>
-        </table>
+        ${tablesHtml}
       </div>
     `;
   }
