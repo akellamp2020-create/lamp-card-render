@@ -1,5 +1,6 @@
 const express = require('express');
 const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -225,23 +226,12 @@ app.post('/render', async (req, res) => {
 
     const html = htmlFromPayload(req.body || {});
 
-    const launchOpts = {
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
-    };
-
-    // Render/Cloud: путь к браузеру должен приходить из env
-    // (на Render мы добавим PUPPETEER_EXECUTABLE_PATH)
-    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-      launchOpts.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-    }
-
-    browser = await puppeteer.launch(launchOpts);
+    browser = await puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
+    });
 
     const page = await browser.newPage();
     await page.setViewport({ width: 900, height: 1600, deviceScaleFactor: 2 });
