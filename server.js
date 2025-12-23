@@ -262,4 +262,6 @@ app.post('/render', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`🚀 LAMP renderer running on http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 LAMP renderer running on port ${PORT}`);
+});
