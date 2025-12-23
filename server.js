@@ -57,10 +57,8 @@ function parsePipeList(str) {
 
 /**
  * Legacy details -> block
- * - rozmin: first+last = pos, middle = neg (логика значений)
- * - normal: всё pos
- *
- * ВАЖНО: цвет НЕ инвертируем здесь, цвет задаётся CSS схемой (schemeRozmin)
+ * rozmin: first + last = pos, middle = neg (как на сайте)
+ * normal: всё pos (для старого detailsRozrah)
  */
 function legacyDetailsToBlock(title, detailsStr, scheme) {
   const parts = parsePipeList(detailsStr);
@@ -135,7 +133,6 @@ function htmlFromPayload(p) {
       padding:28px;
     }
     .wrap{ width:720px; margin:0 auto; }
-
     .card{
       border:1px solid #e9e9e9;
       border-radius:26px;
@@ -152,18 +149,12 @@ function htmlFromPayload(p) {
     .row:first-of-type{ border-top:0; padding-top:6px; }
     .k{ font-size:26px; color:#444; }
     .v{ font-size:34px; font-weight:800; }
+    .pos{ color:#0a7a2f; }
+    .neg{ color:#b00020; }
+    .zero{ color:#111; }
 
-    /* ===== схемы цветов ===== */
-    .schemeNormal .pos{ color:#0a7a2f; } /* зелёный */
-    .schemeNormal .neg{ color:#b00020; } /* красный */
-    .schemeNormal .zero{ color:#111; }
-
-    /* ✅ Розмін — наоборот (как на сайте) */
-    .schemeRozmin .pos{ color:#b00020; } /* красный */
-    .schemeRozmin .neg{ color:#0a7a2f; } /* зелёный */
-    .schemeRozmin .zero{ color:#111; }
-
-    table{ width:100%; border-collapse:collapse; margin-top:12px; table-layout:auto; }
+    /* ✅ таблицы */
+    table.tbl{ width:100%; border-collapse:collapse; margin-top:12px; table-layout:auto; }
     th, td{
       padding:18px 10px; border-top:1px solid #f1f1f1;
       text-align:right; white-space:nowrap;
@@ -177,6 +168,12 @@ function htmlFromPayload(p) {
       font-weight:600; font-size:22px; color:#9a9a9a;
       padding-top:12px; padding-bottom:6px;
     }
+
+    /* ✅ КЛЮЧ: неполная строка (последний чанк) не тянется на 100% */
+    table.tbl.partial{
+      width:auto;
+      display:inline-table;
+    }
   `;
 
   function renderResultCard() {
@@ -184,33 +181,31 @@ function htmlFromPayload(p) {
     const name = esc(R.name ?? '');
     const rows = Array.isArray(R.rows) ? R.rows : [];
     return `
-      <div class="card schemeNormal">
+      <div class="card">
         <div class="title">Результат</div>
         <div class="row"><div class="k">Ім'я</div><div class="v">${name}</div></div>
-        ${rows.map(r => {
-          const cls = String(r.cls || 'zero');
-          return `<div class="row">
-            <div class="k">${esc(r.key ?? '')}</div>
-            <div class="v ${cls}">${esc(r.value ?? '')}</div>
-          </div>`;
-        }).join('')}
+        ${rows
+          .map(r => {
+            const cls = String(r.cls || 'zero');
+            return `<div class="row">
+              <div class="k">${esc(r.key ?? '')}</div>
+              <div class="v ${cls}">${esc(r.value ?? '')}</div>
+            </div>`;
+          })
+          .join('')}
       </div>
     `;
   }
 
   /**
-   * ✅ ВАЖНО:
-   * - Цвет берём ТОЛЬКО из cls и CSS схемы (schemeNormal/schemeRozmin)
-   * - Длинные ряды режем на строки по 6
-   * - Последний ряд "прижат влево" автоматически: cols = vc.length
+   * - НИКАКОЙ инверсии цветов на сервере
+   * - Длинные ряды режем на строки (COLS_PER_ROW)
+   * - Неполный чанк — table.partial (сжимается и влево)
    */
   function renderTableCard(block) {
     if (!block || !Array.isArray(block.rows) || block.rows.length === 0) return '';
 
     const title = esc(block.title || '');
-    const schemeClass = (String(block.scheme || '') === 'rozmin' || title === 'Розмін')
-      ? 'schemeRozmin'
-      : 'schemeNormal';
 
     const COLS_PER_ROW = 6;
 
@@ -221,48 +216,54 @@ function htmlFromPayload(p) {
 
     const needChunk = maxColsAll > COLS_PER_ROW;
 
-    const tablesHtml = block.rows.map(r => {
-      const values = Array.isArray(r?.values) ? r.values : [];
-      const times  = Array.isArray(r?.times)  ? r.times  : [];
+    const tablesHtml = block.rows
+      .map(r => {
+        const values = Array.isArray(r?.values) ? r.values : [];
+        const times  = Array.isArray(r?.times)  ? r.times  : [];
 
-      const hasTimes = times.some(t => String(t?.text ?? '').trim() !== '');
+        const hasTimes = times.some(t => String(t?.text ?? '').trim() !== '');
 
-      const vChunks = needChunk ? chunk(values, COLS_PER_ROW) : [values];
-      const tChunks = needChunk ? chunk(times,  COLS_PER_ROW) : [times];
+        const vChunks = needChunk ? chunk(values, COLS_PER_ROW) : [values];
+        const tChunks = needChunk ? chunk(times,  COLS_PER_ROW) : [times];
 
-      return vChunks.map((vc, idx) => {
-        const tc = tChunks[idx] || [];
-        const cols = Math.max(1, vc.length); // ✅ ключ: строка по факту, прижата ВЛЕВО
+        return vChunks
+          .map((vc, idx) => {
+            const tc = tChunks[idx] || [];
 
-        const header = `<tr><th>${idx === 0 ? 'Разом' : ''}</th>${
-          Array.from({ length: Math.max(0, cols - 1) }, () => `<th></th>`).join('')
-        }</tr>`;
+            const cols = Math.max(1, vc.length);
+            const isPartial = cols < COLS_PER_ROW; // ✅ последний короткий чанк
 
-        const valuesRow = `<tr>${
-          Array.from({ length: cols }, (_, i) => {
-            const c = vc[i] || {};
-            const cls = String(c?.cls || 'zero');
-            return `<td class="${cls}">${esc(c?.text ?? '')}</td>`;
-          }).join('')
-        }</tr>`;
+            const header = `<tr><th>${idx === 0 ? 'Разом' : ''}</th>${
+              Array.from({ length: Math.max(0, cols - 1) }, () => `<th></th>`).join('')
+            }</tr>`;
 
-        const timesRow = (hasTimes && tc.length)
-          ? `<tr class="time">${
-              Array.from({ length: cols }, (_, i) => `<td>${esc(tc[i]?.text ?? '')}</td>`).join('')
-            }</tr>`
-          : '';
+            const valuesRow = `<tr>${
+              Array.from({ length: cols }, (_, i) => {
+                const c = vc[i] || {};
+                const cls = String(c?.cls || 'zero');
+                return `<td class="${cls}">${esc(c?.text ?? '')}</td>`;
+              }).join('')
+            }</tr>`;
 
-        return `
-          <table>
-            <thead>${header}</thead>
-            <tbody>${valuesRow}${timesRow}</tbody>
-          </table>
-        `;
-      }).join('');
-    }).join('');
+            const timesRow = (hasTimes && tc.length)
+              ? `<tr class="time">${
+                  Array.from({ length: cols }, (_, i) => `<td>${esc(tc[i]?.text ?? '')}</td>`).join('')
+                }</tr>`
+              : '';
+
+            return `
+              <table class="tbl${isPartial ? ' partial' : ''}">
+                <thead>${header}</thead>
+                <tbody>${valuesRow}${timesRow}</tbody>
+              </table>
+            `;
+          })
+          .join('');
+      })
+      .join('');
 
     return `
-      <div class="card ${schemeClass}">
+      <div class="card">
         <div class="title">${title}</div>
         ${tablesHtml}
       </div>
