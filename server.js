@@ -24,12 +24,6 @@ function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
-function chunk(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
 function normalizeTableBlock(block) {
   if (!block) return null;
 
@@ -62,8 +56,9 @@ function parsePipeList(str) {
 }
 
 /**
- * Legacy details -> block (на всякий случай оставим)
- * ВАЖНО: сервер НЕ инвертит цвета, cls задаётся как есть.
+ * Legacy details -> block
+ * rozmin: first + last = pos, middle = neg (как на сайте)
+ * normal: всё pos (для старого detailsRozrah)
  */
 function legacyDetailsToBlock(title, detailsStr, scheme) {
   const parts = parsePipeList(detailsStr);
@@ -79,7 +74,6 @@ function legacyDetailsToBlock(title, detailsStr, scheme) {
       {
         values: parts.map((text, idx) => {
           if (sch === 'rozmin') {
-            // старый режим (если вдруг прилетит legacy) — как раньше
             return { text, cls: (idx === 0 || idx === last) ? 'pos' : 'neg' };
           }
           return { text, cls: 'pos' };
@@ -89,6 +83,14 @@ function legacyDetailsToBlock(title, detailsStr, scheme) {
     ],
   };
 }
+
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/* ---------------- HTML ---------------- */
 
 function htmlFromPayload(p) {
   const blocks = p?.blocks || {};
@@ -142,45 +144,41 @@ function htmlFromPayload(p) {
       overflow:hidden;
     }
     .title{ font-size:34px; font-weight:800; margin:0 0 14px 0; }
-
     .row{
       display:flex; justify-content:space-between; gap:16px;
       padding:18px 0; border-top:1px solid #f1f1f1; align-items:center;
     }
     .row:first-of-type{ border-top:0; padding-top:6px; }
     .k{ font-size:26px; color:#444; }
-    .v{ font-size:34px; font-weight:800; }
+    .v{ font-size:34px; font-weight:800; } /* ✅ карточка Результат / строка Разом справа */
     .pos{ color:#0a7a2f; }
     .neg{ color:#b00020; }
     .zero{ color:#111; }
 
-    /* таблицы */
-    table.tbl{ width:100%; border-collapse:collapse; margin-top:12px; }
-    td{
-      padding:18px 10px;
-      border-top:1px solid #f1f1f1;
-      text-align:right;
-      white-space:nowrap;
-      font-size:34px;
-      font-weight:800;
+    /* ✅ таблицы */
+    table.tbl{ width:100%; border-collapse:collapse; margin-top:12px; table-layout:auto; }
+    th, td{
+      padding:18px 10px; border-top:1px solid #f1f1f1;
+      text-align:left; white-space:nowrap; /* ✅ значения прижаты влево */
     }
-    .time td{
-      font-weight:600;
-      font-size:22px;
-      color:#9a9a9a;
-      padding-top:12px;
-      padding-bottom:6px;
-      text-align:center;
+    th{
+      text-align:left; color:#111; font-size:26px; font-weight:800;
+      background:transparent; border-top:0; padding:18px 10px; /* ✅ убрали серую заливку */
     }
 
-    /* ✅ последний неполный чанк НЕ растягиваем */
+    /* ✅ ВАЖНО: ВСЕ числа в таблицах НЕ жирные */
+    td{ font-size:34px; font-weight:400; }
+
+    .time td{
+      font-weight:600; font-size:22px; color:#9a9a9a;
+      padding-top:12px; padding-bottom:6px;
+    }
+
+    /* ✅ короткий последний чанк не тянется и остается слева */
     table.tbl.partial{
       width:auto;
       display:inline-table;
     }
-
-    /* чтобы неполные таблицы реально прижимались влево */
-    .chunks{ text-align:left; }
   `;
 
   function renderResultCard() {
@@ -203,10 +201,10 @@ function htmlFromPayload(p) {
   }
 
   /**
-   * ✅ Новый рендер таблиц:
-   * 1) "Разом" отдельной строкой (label слева + значение справа)
-   * 2) остальные значения — чанками по 6, начиная с 1-го столбца
-   * 3) последний неполный чанк — table.partial (слева)
+   * ✅ Новый формат:
+   * - 1-я ячейка (values[0]) — это "Разом", НЕ в таблице, а справа в строке "Разом"
+   * - остальное (values[1..]) — в таблице чанками по 6
+   * - цвета берём из payload (cls), сервер ничего не инвертит
    */
   function renderTableCard(block) {
     if (!block || !Array.isArray(block.rows) || block.rows.length === 0) return '';
@@ -218,54 +216,62 @@ function htmlFromPayload(p) {
       const valuesAll = Array.isArray(r?.values) ? r.values : [];
       const timesAll  = Array.isArray(r?.times)  ? r.times  : [];
 
-      const totalV = valuesAll[0] || { text: '', cls: 'zero' };
-      const totalT = timesAll[0]  || { text: '' };
+      const totalV = valuesAll[0] || null; // "Разом"
+      const restV  = valuesAll.slice(1);
+      const restT  = timesAll.slice(1);
 
-      const restV = valuesAll.slice(1);
-      const restT = timesAll.slice(1);
+      const hasTimes = restT.some(t => String(t?.text ?? '').trim() !== '');
 
-      const hasTimes = restT.some(t => String(t?.text ?? '').trim() !== '') || String(totalT?.text ?? '').trim() !== '';
+      // 1) строка Разом + значение справа (ЖИРНЫМ)
+      let html = '';
+      if (totalV) {
+        const cls = String(totalV.cls || 'zero');
+        html += `
+          <div class="row">
+            <div class="k"><b>Разом</b></div>
+            <div class="v ${cls}">${esc(totalV.text ?? '')}</div>
+          </div>
+        `;
+      } else {
+        // если вдруг нет total — всё равно покажем "Разом"
+        html += `
+          <div class="row">
+            <div class="k"><b>Разом</b></div>
+            <div class="v zero"></div>
+          </div>
+        `;
+      }
 
-      // 1) строка Разом (как в UI)
-      let html = `
-        <div class="row">
-          <div class="k"><b>Разом</b></div>
-          <div class="v ${esc(totalV.cls || 'zero')}" style="font-weight:800">${esc(totalV.text || '')}</div>
-        </div>
-      `;
-
-      // 2) остальные значения чанками
+      // 2) таблицы по 6, ВСЕ значения стартуют с 1-го столбца (нет пустой колонки)
       const vChunks = chunk(restV, COLS_PER_ROW);
       const tChunks = chunk(restT, COLS_PER_ROW);
 
-      html += `<div class="chunks">`;
-
-      vChunks.forEach((vc, idx) => {
+      html += vChunks.map((vc, idx) => {
         const tc = tChunks[idx] || [];
         const cols = Math.max(1, vc.length);
         const isPartial = cols < COLS_PER_ROW;
 
         const valuesRow = `<tr>${
-          vc.map(c => `<td class="${esc(c?.cls || 'zero')}">${esc(c?.text ?? '')}</td>`).join('')
+          Array.from({ length: cols }, (_, i) => {
+            const c = vc[i] || {};
+            const cls = String(c?.cls || 'zero');
+            return `<td class="${cls}">${esc(c?.text ?? '')}</td>`;
+          }).join('')
         }</tr>`;
 
-        const timesRow = hasTimes
+        const timesRow = (hasTimes && tc.length)
           ? `<tr class="time">${
               Array.from({ length: cols }, (_, i) => `<td>${esc(tc[i]?.text ?? '')}</td>`).join('')
             }</tr>`
           : '';
 
-        html += `
+        return `
           <table class="tbl${isPartial ? ' partial' : ''}">
-            <tbody>
-              ${valuesRow}
-              ${timesRow}
-            </tbody>
+            <tbody>${valuesRow}${timesRow}</tbody>
           </table>
         `;
-      });
+      }).join('');
 
-      html += `</div>`;
       return html;
     }).join('');
 
