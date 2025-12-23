@@ -5,7 +5,7 @@ const chromium = require('@sparticuz/chromium');
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
-/** ✅ CORS для Google Sites */
+/** CORS */
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
@@ -48,42 +48,6 @@ function normalizeTableBlock(block) {
   };
 }
 
-function parsePipeList(str) {
-  return String(str || '')
-    .split('|')
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-
-/**
- * Legacy details -> block
- * rozmin: first + last = pos, middle = neg (как на сайте)
- * normal: всё pos (для старого detailsRozrah)
- */
-function legacyDetailsToBlock(title, detailsStr, scheme) {
-  const parts = parsePipeList(detailsStr);
-  if (!parts.length) return null;
-
-  const sch = scheme || 'normal';
-  const last = parts.length - 1;
-
-  return {
-    title,
-    scheme: sch,
-    rows: [
-      {
-        values: parts.map((text, idx) => {
-          if (sch === 'rozmin') {
-            return { text, cls: (idx === 0 || idx === last) ? 'pos' : 'neg' };
-          }
-          return { text, cls: 'pos' };
-        }),
-        times: [],
-      },
-    ],
-  };
-}
-
 function chunk(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -96,36 +60,9 @@ function htmlFromPayload(p) {
   const blocks = p?.blocks || {};
   const result = blocks?.result || null;
 
-  let rozmin = normalizeTableBlock(blocks?.rozmin);
-  let rozrah = normalizeTableBlock(blocks?.rozrahunok);
+  const rozmin = normalizeTableBlock(blocks?.rozmin);
+  const rozrah = normalizeTableBlock(blocks?.rozrahunok);
 
-  // legacy fallback for Result card
-  const fallbackResult =
-    (!result && (p?.name || p?.labelRozmin || p?.labelRozrah || p?.labelDebt))
-      ? {
-          title: 'Результат',
-          scheme: 'normal',
-          name: String(p?.name ?? ''),
-          rows: [
-            { key: String(p?.labelRozmin ?? 'Розмін'), value: String(p?.valueRozmin ?? ''), cls: 'pos' },
-            { key: String(p?.labelRozrah ?? 'Розрахунок'), value: String(p?.valueRozrah ?? ''), cls: 'pos' },
-            { key: String(p?.labelDebt ?? 'Підсумок'), value: String(p?.valueDebt ?? ''), cls: 'pos' },
-          ],
-        }
-      : null;
-
-  const R = result || fallbackResult;
-
-  // legacy fallback for tables
-  if (!rozmin && p?.detailsRozmin) {
-    rozmin = normalizeTableBlock(legacyDetailsToBlock('Розмін', p.detailsRozmin, 'rozmin'));
-  }
-  if (!rozrah && (p?.detailsRozrah || p?.valueRozrah)) {
-    const src = p?.detailsRozrah ? p.detailsRozrah : String(p.valueRozrah);
-    rozrah = normalizeTableBlock(legacyDetailsToBlock('Розрахунок', src, 'normal'));
-  }
-
-  // ✅ ДОБАВИЛИ: дата игры (из payload.gameDate)
   const gameDate = String(p?.gameDate || '').trim();
   const resultTitle = gameDate ? `Результат гри від ${gameDate}` : 'Результат гри';
 
@@ -154,31 +91,23 @@ function htmlFromPayload(p) {
     }
     .row:first-of-type{ border-top:0; padding-top:6px; }
     .k{ font-size:26px; color:#444; }
-    .v{ font-size:34px; font-weight:800; } /* ✅ карточка Результат / строка Разом справа */
+    .v{ font-size:34px; font-weight:800; } /* в Result */
     .pos{ color:#0a7a2f; }
     .neg{ color:#b00020; }
     .zero{ color:#111; }
 
-    /* ✅ таблицы */
     table.tbl{ width:100%; border-collapse:collapse; margin-top:12px; table-layout:auto; }
-    th, td{
+    td{
       padding:18px 10px; border-top:1px solid #f1f1f1;
-      text-align:left; white-space:nowrap; /* ✅ значения прижаты влево */
+      text-align:left; white-space:nowrap;
+      font-size:34px; font-weight:400; /* ✅ числа в таблицах НЕ жирные */
     }
-    th{
-      text-align:left; color:#111; font-size:26px; font-weight:800;
-      background:transparent; border-top:0; padding:18px 10px; /* ✅ убрали серую заливку */
-    }
-
-    /* ✅ ВАЖНО: ВСЕ числа в таблицах НЕ жирные */
-    td{ font-size:34px; font-weight:400; }
-
     .time td{
       font-weight:600; font-size:22px; color:#9a9a9a;
       padding-top:12px; padding-bottom:6px;
     }
 
-    /* ✅ короткий последний чанк не тянется и остается слева */
+    /* короткий последний чанк не тянется и остается слева */
     table.tbl.partial{
       width:auto;
       display:inline-table;
@@ -186,11 +115,10 @@ function htmlFromPayload(p) {
   `;
 
   function renderResultCard() {
-    if (!R) return '';
-    const name = esc(R.name ?? '');
-    const rows = Array.isArray(R.rows) ? R.rows : [];
+    if (!result) return '';
+    const name = esc(result.name ?? '');
+    const rows = Array.isArray(result.rows) ? result.rows : [];
 
-    // ✅ ИСПРАВИЛИ: заголовок с датой
     return `
       <div class="card">
         <div class="title">${esc(resultTitle)}</div>
@@ -207,10 +135,9 @@ function htmlFromPayload(p) {
   }
 
   /**
-   * ✅ Новый формат:
-   * - 1-я ячейка (values[0]) — это "Разом", НЕ в таблице, а справа в строке "Разом"
-   * - остальное (values[1..]) — в таблице чанками по 6
-   * - цвета берём из payload (cls), сервер ничего не инвертит
+   * ✅ Розмін/Розрахунок:
+   * - "Разом" (values[0]) НЕ рисуем вообще
+   * - по 5 чисел в строке
    */
   function renderTableCard(block) {
     if (!block || !Array.isArray(block.rows) || block.rows.length === 0) return '';
@@ -222,36 +149,16 @@ function htmlFromPayload(p) {
       const valuesAll = Array.isArray(r?.values) ? r.values : [];
       const timesAll  = Array.isArray(r?.times)  ? r.times  : [];
 
-      const totalV = valuesAll[0] || null; // "Разом"
-      const restV  = valuesAll.slice(1);
-      const restT  = timesAll.slice(1);
+      // ⛔ убрали "Разом"
+      const restV = valuesAll.slice(1);
+      const restT = timesAll.slice(1);
+      if (!restV.length) return '';
 
-      const hasTimes = restT.some(t => String(t?.text ?? '').trim() !== '');
-
-      // 1) строка Разом + значение справа (ЖИРНЫМ)
-      let html = '';
-      if (totalV) {
-        const cls = String(totalV.cls || 'zero');
-        html += `
-          <div class="row">
-            <div class="k"><b>Разом</b></div>
-            <div class="v ${cls}">${esc(totalV.text ?? '')}</div>
-          </div>
-        `;
-      } else {
-        html += `
-          <div class="row">
-            <div class="k"><b>Разом</b></div>
-            <div class="v zero"></div>
-          </div>
-        `;
-      }
-
-      // 2) таблицы по 6
       const vChunks = chunk(restV, COLS_PER_ROW);
       const tChunks = chunk(restT, COLS_PER_ROW);
+      const hasTimes = restT.some(t => String(t?.text ?? '').trim() !== '');
 
-      html += vChunks.map((vc, idx) => {
+      return vChunks.map((vc, idx) => {
         const tc = tChunks[idx] || [];
         const cols = Math.max(1, vc.length);
         const isPartial = cols < COLS_PER_ROW;
@@ -276,8 +183,6 @@ function htmlFromPayload(p) {
           </table>
         `;
       }).join('');
-
-      return html;
     }).join('');
 
     return `
@@ -305,7 +210,7 @@ function htmlFromPayload(p) {
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 /* ---------- ROOT ---------- */
-app.get('/', (req, res) => res.type('text').send('LAMP renderer OK ✅\nUse POST /render or GET /health'));
+app.get('/', (req, res) => res.type('text').send('LAMP renderer OK ✅\\nUse POST /render or GET /health'));
 
 /* ---------- RENDER ---------- */
 app.post('/render', async (req, res) => {
