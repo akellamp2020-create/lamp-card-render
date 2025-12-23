@@ -216,7 +216,7 @@ function htmlFromPayload(p) {
     if (!block || !Array.isArray(block.rows) || block.rows.length === 0) return '';
 
     const title = esc(block.title || '');
-    const COLS_PER_ROW = 6;
+    const COLS_PER_ROW = 5;
 
     const rowsHtml = block.rows.map(r => {
       const valuesAll = Array.isArray(r?.values) ? r.values : [];
