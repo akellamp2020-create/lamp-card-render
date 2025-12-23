@@ -14,7 +14,7 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ---------------- helpers ---------------- */
+/* ---------- helpers ---------- */
 
 function esc(s) {
   return String(s ?? '')
@@ -54,7 +54,7 @@ function chunk(arr, size) {
   return out;
 }
 
-/* ---------------- HTML ---------------- */
+/* ---------- HTML ---------- */
 
 function htmlFromPayload(p) {
   const blocks = p?.blocks || {};
@@ -91,23 +91,22 @@ function htmlFromPayload(p) {
     }
     .row:first-of-type{ border-top:0; padding-top:6px; }
     .k{ font-size:26px; color:#444; }
-    .v{ font-size:34px; font-weight:800; } /* в Result */
+    .v{ font-size:34px; font-weight:800; } /* в Результате цифры жирные */
     .pos{ color:#0a7a2f; }
     .neg{ color:#b00020; }
     .zero{ color:#111; }
 
+    /* таблицы: значения слева, НЕ жирные */
     table.tbl{ width:100%; border-collapse:collapse; margin-top:12px; table-layout:auto; }
     td{
       padding:18px 10px; border-top:1px solid #f1f1f1;
       text-align:left; white-space:nowrap;
-      font-size:34px; font-weight:400; /* ✅ числа в таблицах НЕ жирные */
+      font-size:34px; font-weight:400;
     }
     .time td{
       font-weight:600; font-size:22px; color:#9a9a9a;
       padding-top:12px; padding-bottom:6px;
     }
-
-    /* короткий последний чанк не тянется и остается слева */
     table.tbl.partial{
       width:auto;
       display:inline-table;
@@ -135,9 +134,9 @@ function htmlFromPayload(p) {
   }
 
   /**
-   * ✅ Розмін/Розрахунок:
-   * - "Разом" (values[0]) НЕ рисуем вообще
-   * - по 5 чисел в строке
+   * ✅ Блоки Розмін/Розрахунок:
+   * - "Разом" полностью НЕ показываем (первый элемент массива игнорируем)
+   * - максимум 5 чисел в строке
    */
   function renderTableCard(block) {
     if (!block || !Array.isArray(block.rows) || block.rows.length === 0) return '';
@@ -149,17 +148,19 @@ function htmlFromPayload(p) {
       const valuesAll = Array.isArray(r?.values) ? r.values : [];
       const timesAll  = Array.isArray(r?.times)  ? r.times  : [];
 
-      // ⛔ убрали "Разом"
-      const restV = valuesAll.slice(1);
-      const restT = timesAll.slice(1);
-      if (!restV.length) return '';
+      // ⛔️ игнорируем "Разом"
+      const values = valuesAll.slice(1);
+      const times  = timesAll.slice(1);
 
-      const vChunks = chunk(restV, COLS_PER_ROW);
-      const tChunks = chunk(restT, COLS_PER_ROW);
-      const hasTimes = restT.some(t => String(t?.text ?? '').trim() !== '');
+      if (!values.length) return '';
+
+      const vChunks = chunk(values, COLS_PER_ROW);
+      const tChunks = chunk(times,  COLS_PER_ROW);
 
       return vChunks.map((vc, idx) => {
         const tc = tChunks[idx] || [];
+        const hasTimes = tc.some(t => String(t?.text ?? '').trim() !== '');
+
         const cols = Math.max(1, vc.length);
         const isPartial = cols < COLS_PER_ROW;
 
@@ -184,6 +185,8 @@ function htmlFromPayload(p) {
         `;
       }).join('');
     }).join('');
+
+    if (!rowsHtml.trim()) return '';
 
     return `
       <div class="card">
