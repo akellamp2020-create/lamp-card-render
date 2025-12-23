@@ -24,6 +24,12 @@ function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
 function normalizeTableBlock(block) {
   if (!block) return null;
 
@@ -56,9 +62,8 @@ function parsePipeList(str) {
 }
 
 /**
- * Legacy details -> block
- * rozmin: first + last = pos, middle = neg (как на сайте)
- * normal: всё pos (для старого detailsRozrah)
+ * Legacy details -> block (на всякий случай оставим)
+ * ВАЖНО: сервер НЕ инвертит цвета, cls задаётся как есть.
  */
 function legacyDetailsToBlock(title, detailsStr, scheme) {
   const parts = parsePipeList(detailsStr);
@@ -74,6 +79,7 @@ function legacyDetailsToBlock(title, detailsStr, scheme) {
       {
         values: parts.map((text, idx) => {
           if (sch === 'rozmin') {
+            // старый режим (если вдруг прилетит legacy) — как раньше
             return { text, cls: (idx === 0 || idx === last) ? 'pos' : 'neg' };
           }
           return { text, cls: 'pos' };
@@ -82,12 +88,6 @@ function legacyDetailsToBlock(title, detailsStr, scheme) {
       },
     ],
   };
-}
-
-function chunk(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
 }
 
 function htmlFromPayload(p) {
@@ -139,9 +139,10 @@ function htmlFromPayload(p) {
       padding:22px;
       background:#fff;
       margin:0 0 22px 0;
-      overflow:hidden; /* ✅ ничего не вылезает за скругления */
+      overflow:hidden;
     }
     .title{ font-size:34px; font-weight:800; margin:0 0 14px 0; }
+
     .row{
       display:flex; justify-content:space-between; gap:16px;
       padding:18px 0; border-top:1px solid #f1f1f1; align-items:center;
@@ -153,27 +154,33 @@ function htmlFromPayload(p) {
     .neg{ color:#b00020; }
     .zero{ color:#111; }
 
-    /* ✅ таблицы */
-    table.tbl{ width:100%; border-collapse:collapse; margin-top:12px; table-layout:auto; }
-    th, td{
-      padding:18px 10px; border-top:1px solid #f1f1f1;
-      text-align:right; white-space:nowrap;
+    /* таблицы */
+    table.tbl{ width:100%; border-collapse:collapse; margin-top:12px; }
+    td{
+      padding:18px 10px;
+      border-top:1px solid #f1f1f1;
+      text-align:right;
+      white-space:nowrap;
+      font-size:34px;
+      font-weight:800;
     }
-    th{
-      text-align:left; color:#111; font-size:26px; font-weight:800;
-      background:#fafafa; border-top:0; padding:18px 10px;
-    }
-    td{ font-size:34px; font-weight:800; }
     .time td{
-      font-weight:600; font-size:22px; color:#9a9a9a;
-      padding-top:12px; padding-bottom:6px;
+      font-weight:600;
+      font-size:22px;
+      color:#9a9a9a;
+      padding-top:12px;
+      padding-bottom:6px;
+      text-align:center;
     }
 
-    /* ✅ КЛЮЧ: неполная строка (последний чанк) не тянется на 100% */
+    /* ✅ последний неполный чанк НЕ растягиваем */
     table.tbl.partial{
       width:auto;
       display:inline-table;
     }
+
+    /* чтобы неполные таблицы реально прижимались влево */
+    .chunks{ text-align:left; }
   `;
 
   function renderResultCard() {
@@ -184,88 +191,88 @@ function htmlFromPayload(p) {
       <div class="card">
         <div class="title">Результат</div>
         <div class="row"><div class="k">Ім'я</div><div class="v">${name}</div></div>
-        ${rows
-          .map(r => {
-            const cls = String(r.cls || 'zero');
-            return `<div class="row">
-              <div class="k">${esc(r.key ?? '')}</div>
-              <div class="v ${cls}">${esc(r.value ?? '')}</div>
-            </div>`;
-          })
-          .join('')}
+        ${rows.map(r => {
+          const cls = String(r.cls || 'zero');
+          return `<div class="row">
+            <div class="k">${esc(r.key ?? '')}</div>
+            <div class="v ${cls}">${esc(r.value ?? '')}</div>
+          </div>`;
+        }).join('')}
       </div>
     `;
   }
 
   /**
-   * - НИКАКОЙ инверсии цветов на сервере
-   * - Длинные ряды режем на строки (COLS_PER_ROW)
-   * - Неполный чанк — table.partial (сжимается и влево)
+   * ✅ Новый рендер таблиц:
+   * 1) "Разом" отдельной строкой (label слева + значение справа)
+   * 2) остальные значения — чанками по 6, начиная с 1-го столбца
+   * 3) последний неполный чанк — table.partial (слева)
    */
   function renderTableCard(block) {
     if (!block || !Array.isArray(block.rows) || block.rows.length === 0) return '';
 
     const title = esc(block.title || '');
-
     const COLS_PER_ROW = 6;
 
-    const maxColsAll = Math.max(
-      1,
-      ...block.rows.map(r => (Array.isArray(r?.values) ? r.values.length : 0))
-    );
+    const rowsHtml = block.rows.map(r => {
+      const valuesAll = Array.isArray(r?.values) ? r.values : [];
+      const timesAll  = Array.isArray(r?.times)  ? r.times  : [];
 
-    const needChunk = maxColsAll > COLS_PER_ROW;
+      const totalV = valuesAll[0] || { text: '', cls: 'zero' };
+      const totalT = timesAll[0]  || { text: '' };
 
-    const tablesHtml = block.rows
-      .map(r => {
-        const values = Array.isArray(r?.values) ? r.values : [];
-        const times  = Array.isArray(r?.times)  ? r.times  : [];
+      const restV = valuesAll.slice(1);
+      const restT = timesAll.slice(1);
 
-        const hasTimes = times.some(t => String(t?.text ?? '').trim() !== '');
+      const hasTimes = restT.some(t => String(t?.text ?? '').trim() !== '') || String(totalT?.text ?? '').trim() !== '';
 
-        const vChunks = needChunk ? chunk(values, COLS_PER_ROW) : [values];
-        const tChunks = needChunk ? chunk(times,  COLS_PER_ROW) : [times];
+      // 1) строка Разом (как в UI)
+      let html = `
+        <div class="row">
+          <div class="k"><b>Разом</b></div>
+          <div class="v ${esc(totalV.cls || 'zero')}" style="font-weight:800">${esc(totalV.text || '')}</div>
+        </div>
+      `;
 
-        return vChunks
-          .map((vc, idx) => {
-            const tc = tChunks[idx] || [];
+      // 2) остальные значения чанками
+      const vChunks = chunk(restV, COLS_PER_ROW);
+      const tChunks = chunk(restT, COLS_PER_ROW);
 
-            const cols = Math.max(1, vc.length);
-            const isPartial = cols < COLS_PER_ROW; // ✅ последний короткий чанк
+      html += `<div class="chunks">`;
 
-            const header = `<tr><th>${idx === 0 ? 'Разом' : ''}</th>${
-              Array.from({ length: Math.max(0, cols - 1) }, () => `<th></th>`).join('')
-            }</tr>`;
+      vChunks.forEach((vc, idx) => {
+        const tc = tChunks[idx] || [];
+        const cols = Math.max(1, vc.length);
+        const isPartial = cols < COLS_PER_ROW;
 
-            const valuesRow = `<tr>${
-              Array.from({ length: cols }, (_, i) => {
-                const c = vc[i] || {};
-                const cls = String(c?.cls || 'zero');
-                return `<td class="${cls}">${esc(c?.text ?? '')}</td>`;
-              }).join('')
-            }</tr>`;
+        const valuesRow = `<tr>${
+          vc.map(c => `<td class="${esc(c?.cls || 'zero')}">${esc(c?.text ?? '')}</td>`).join('')
+        }</tr>`;
 
-            const timesRow = (hasTimes && tc.length)
-              ? `<tr class="time">${
-                  Array.from({ length: cols }, (_, i) => `<td>${esc(tc[i]?.text ?? '')}</td>`).join('')
-                }</tr>`
-              : '';
+        const timesRow = hasTimes
+          ? `<tr class="time">${
+              Array.from({ length: cols }, (_, i) => `<td>${esc(tc[i]?.text ?? '')}</td>`).join('')
+            }</tr>`
+          : '';
 
-            return `
-              <table class="tbl${isPartial ? ' partial' : ''}">
-                <thead>${header}</thead>
-                <tbody>${valuesRow}${timesRow}</tbody>
-              </table>
-            `;
-          })
-          .join('');
-      })
-      .join('');
+        html += `
+          <table class="tbl${isPartial ? ' partial' : ''}">
+            <tbody>
+              ${valuesRow}
+              ${timesRow}
+            </tbody>
+          </table>
+        `;
+      });
+
+      html += `</div>`;
+      return html;
+    }).join('');
 
     return `
       <div class="card">
         <div class="title">${title}</div>
-        ${tablesHtml}
+        ${rowsHtml}
       </div>
     `;
   }
